@@ -1,0 +1,469 @@
+---
+title: "Disease mapping en Aragón: Análisis de la mortalidad por enfermedad isquémica en hombres"
+author: "Jorge Mestre Tomás y Sebastian Bogdan Bera"
+date: "13/01/2024"
+bibliography: referencias/references.bib
+csl: estilos/elsevier-vancouver.csl
+output:
+  html_document:
+    number_sections: false
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+    fig_caption: yes
+    theme: spacelab
+---
+
+<style>
+body {
+text-align: justify
+}
+p.caption {
+  font-size: 0.8em;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r packages, include=FALSE}
+# Lista de paquetes
+paquetes <- c("tidyverse", "sf", "spdep", "ggthemes", "DOYPAColors", "INLA", 
+              "R2WinBUGS", "ggpubr", "pander", "coda")
+
+# Instalar paquetes que no están instalados
+nuevos_paquetes <- paquetes[!(paquetes %in% installed.packages()[,"Package"])]
+if(length(nuevos_paquetes)) install.packages(nuevos_paquetes, dependencies = TRUE)
+
+# Cargar paquetes
+library(tidyverse)
+library(sf)
+library(spdep)
+library(ggthemes)
+library(DOYPAColors)
+library(INLA)
+library(R2WinBUGS)
+library(ggpubr)
+library(pander)
+library(coda)
+
+# Tema personalizado
+mytheme <- theme_bw() +
+  theme(axis.line = element_blank(), panel.background = element_blank(),
+        panel.border = element_blank(), panel.grid = element_blank(),
+        axis.text = element_blank(), axis.ticks = element_blank(),
+        axis.title = element_blank(), legend.title = element_text(size = 10), 
+        legend.text  = element_text(size = 8),
+        legend.key.size = unit(0.8, "lines"),
+        plot.title = element_text(size = 8, face = "bold", hjust = 0.5))
+```
+
+# Introducción
+
+Las enfermedades cardiovasculares son la principal causa de muerte en los países desarrollados [@forouzanfar2012assessing], y en España se han convertido en una prioridad política y sanitaria debido a las alarmantes cifras de mortalidad a nivel mundial [@medrano2006incidencia]. Aunque España presenta una de las tasas de mortalidad por enfermedad isquémica más bajas entre los países de la Unión Europea, existen diferencias regionales [@ocana2015efectos] y es la primera causa de muerte en varones y la segunda en mujeres [@INE2013], usualmente relacionada con el tabaquismo [@meza2022epidemiologia]. Por tanto, es crucial comprender las características específicas de cada región para una planificación sanitaria efectiva. En particular, Aragón, con más de 1,300 millones de habitantes, experimentó las enfermedades isquémicas como la segunda causa de muerte en el año 2022 [@DGAS2022].
+
+Este estudio se centrará en analizar los datos de mortalidad por enfermedad isquémica en hombres en los diversos municipios de Aragón durante el periodo 1991-2000. Se cuentan con cifras de casos observados y esperados por municipio para analizar el riesgo de esta problemática en la región.
+
+# Tarea 1. Mortalidad observada en Aragón
+
+En la Figura 1A se muestra el número de defunciones observadas por municipio en Aragón. Se observa que los municipios con un mayor número de casos coinciden con aquellos de mayor tamaño y una población más numerosa (Figuras 1C y 1D). Por ejemplo, en la provincia de Zaragoza, en la zona cercana al río Ebro, donde los municipios son más extensos y más poblados, se registra un mayor número de casos. Por el contrario, en la provincia de Teruel, donde los municipios son más pequeños, se observa un menor número de defunciones, excepto en la capital, Teruel, donde la población es más numerosa. Por lo tanto, este tipo de representación no resulta la más idónea para analizar el riesgo de la enfermedad en cada región.
+
+En la Figura 1B se representa la Razon de Mortalidad Estandarizada (RME) para cada municipio $i$,
+
+$$
+RME_i = \frac{O_i}{E_i},
+$$
+donde $O_i$ es el número de defunciones observadas por enfermedad isquémica y $E_i$ es el número de casos esperados. La RME nos permite identificar regiones con mayor o menor riesgo al disolver el efecto de la población del municipio que observamos en la Figura 1A al representar únicamente los casos observados. Un RME mayor que 1 indica un exceso de riesgo, es decir, se observan más casos de los esperados. En la Figura 1B vemos que la franja de municipios con muchas defunciones que observábamos en Zaragoza ahora presenta RMEs cercanos a 1, incluyendo municipios con valores por debajo de 1.
+
+```{r load_data, results = 'hide'}
+# Cargar cartografia y datos
+load("datos/Aragon.Rdata")
+aragon_poly <- sf::st_read("datos/aragon.shp")
+
+# Ordenar ambos objetos por comunidad
+aragon_poly <- aragon_poly[match(Aragon.df$CODMUNI, aragon_poly$CODMUNI), ]
+#table(aragon_poly$CODMUNI == Aragon.df$CODMUNI) # Comprobar orden
+
+# Razon Mortalidad Estandarizada
+aragon_poly$O <- Aragon.df$O
+aragon_poly$E <- Aragon.df$E
+aragon_poly$RME_raw <- aragon_poly$O/aragon_poly$E
+```
+
+```{r plot_raw_data, echo = FALSE, fig.cap="**Figura 1**. (**A**) Casos observados de mortalidad por enfermedad isquémica en hombres, (**B**) Razón de Mortalidad Estandarizada, (**C**) población total y (**D**) población de hombres en los municipios de Aragón."}
+# Categorizar
+aragon_poly$O_disc <- cut(aragon_poly$O,
+                          breaks = c(0, 1, 2, 5, max(aragon_poly$O)),
+                          right = F, include.lowest = T)
+aragon_poly$RME_raw_disc <- cut(aragon_poly$RME_raw,
+                                breaks = c(0.00, 0.10, 0.48, 1.35, max(aragon_poly$RME_raw)),
+                                right = F, include.lowest = T)
+aragon_poly$POB95_disc <- cut(aragon_poly$POB95,
+                              breaks = c(0, 257, 598, 1386, max(aragon_poly$POB95)),
+                              include.lowest = T)
+aragon_poly$POB95M_disc <- cut(aragon_poly$POB95M,
+                               breaks = c(0, 133, 313, 694, max(aragon_poly$POB95M)),
+                               include.lowest = T)
+
+p1 <- ggplot(data = aragon_poly) +
+  geom_sf(aes(fill = O_disc), color = "white") +
+  mytheme +
+  scale_fill_doypa("groovy", n = 4, discrete = T, name = "Casos observados",
+                   guide = guide_legend(reverse = TRUE)) +
+  labs(subtitle = "A") 
+
+p2 <- ggplot(data = aragon_poly) +
+  geom_sf(aes(fill = RME_raw_disc), color = "white") +
+  mytheme +
+  scale_fill_doypa("groovy", n = 4, discrete = T, name = "RME",
+                   guide = guide_legend(reverse = TRUE)) +
+  labs(subtitle = "B")
+
+p3 <- ggplot(data = aragon_poly) +
+  geom_sf(aes(fill = POB95_disc), color = "white") +
+  mytheme +
+  scale_fill_doypa("groovy", n = 4, discrete = T, name = "Población",
+                   guide = guide_legend(reverse = TRUE)) +
+  labs(subtitle = "C")
+
+p4 <- ggplot(data = aragon_poly) +
+  geom_sf(aes(fill = POB95M_disc), color = "white") +
+  mytheme +
+  scale_fill_doypa("groovy", n = 4, discrete = T, name = "Población hombres",
+                   guide = guide_legend(reverse = TRUE)) +
+  labs(subtitle = "D")
+
+ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
+```
+
+Sin embargo, al observar más detenidamente, la mayoría de los municipios con valores extremos (altos y bajos) de RME son municipios de pequeño tamaño. Aunque la RME nos ayuda a mitigar el efecto del tamaño poblacional de los municipios, presenta problemas en la estimación en áreas pequeñas, ya que los municipios pequeños tendrán RMEs extremas al calcular el ratio entre observados y esperados. Por lo tanto, plantearemos un modelo jerárquico en el que se comparta información entre los municipios para suavizar la estimación de los riesgos y reducir la volatilidad en función de la población de los municipios. Vamos a proponer la utilización de un modelo Besag-York-Mollié (BYM).
+
+El modelo BYM es un modelo espacial muy popular que tiene en cuenta la correlación espacial, de modo que los municipios más cercanos tendrán observaciones más similares que los municipios más alejados. Este modelo incorpora efectos aleatorios que abordan dos fuentes de variabilidad: un efecto aleatorio espacial que suaviza los datos según una estructura de vecindad, y un efecto aleatorio no estructurado que captura el ruido heterogéneo. Por lo tanto, es importante definir las relaciones de vecindad, ya que la estructura de la varianza-covarianza del efecto espacial depende de esta. En nuestro caso, definimos como vecinos a los municipios que comparten frontera, es decir, aquellos municipios adyacentes. En la Figura 2 se presentan los municipios de Aragón junto con la matriz de adyacencia.
+
+```{r neighbours}
+# Estructura de vecindad - municipios adyacentes
+neighbours <- poly2nb(aragon_poly)
+
+# Tranformar formato del grafo
+nbWinBugs <- nb2WB(neighbours)
+tmp_nbINLA <- tempfile()
+nb2INLA(file = tmp_nbINLA, nb = neighbours)
+H <- inla.read.graph(tmp_nbINLA)
+```
+
+```{r plot_neighbours, echo = FALSE, fig.cap="**Figura 2**. Relación de vecindad entre los municipios de Aragón."}
+coords <- st_coordinates(st_centroid(st_geometry(aragon_poly)))
+plot(st_geometry(aragon_poly), border="grey")
+plot(neighbours, coords, add = T)
+title(main="Relación vecindad municipios Aragón", cex.main=0.6)
+```
+
+# Tarea 2. Ajuste del modelo {.tabset .tabset-fade}
+
+Vamos a considerar un modelo BYM donde el número de casos por municipio $O_i$ sigue una distribución de Poisson, en el que $\mu_i$ es el número medio de casos por municipio, y $\lambda_i / E_i$ la tasa de casos corregida por los casos esperados $E_i$ incluidos como offset. Además, el modelo BYM incluye efectos aleatorios de tipo heterogéneo y CAR-normal para abordar ambas fuentes de variabilidad (intraregional y supraregional):
+
+\begin{align}
+&O_i \sim Poisson(\mu_i), \quad i = 1, ..., 729 ,\\
+
+&log(\mu_i) = log(E_i) + log(\lambda_i) = log(E_i) + \beta_0 + u_i + v_i, \\
+
+&u_i \sim N(0, \tau_u^{-1}), \quad v_i | \pmb{v}_{-i} \sim N(\frac{1}{n_i}\sum_{i \sim j} v_j, \frac{1}{n_i\tau_v}),
+\end{align}
+
+donde modelamos $log(\lambda_i)$ mediante un predictor lineal formado por un intercepto $\beta_0$, un efecto aleatorio independiente $u_i$ (i.i.d.) y un efecto espacial estructurado $v_i$.
+
+Vamos a ajustar el modelo tanto en WinBUGS (MCMC) como en INLA (basado en la aproximación de Laplace). Para los hiperparámetros del modelo, hemos optado por establecer en WinBUGS distribuciones a priori uniformes para $\tau_u$ y $\tau_v$,
+
+$$
+\tau_u \sim \text{Uniforme}(0, 10), \quad  \tau_v \sim \text{Uniforme}(0, 10).
+$$
+
+Como en INLA no están predefinidas la mayoría de distribuciones priors, hemos definido mediante el uso de `expression` una distribución prior uniforme impropia para la desviación estándar. Es importante tener en cuenta esto al comparar modelos.
+
+## Implementación en WinBUGS {.tabset .tabset-fade}
+
+Después de ejecutar el modelo en WinBUGS, vemos que las cadenas convergen adecuadamente sin observar gran dependencia en las cadenas. El número efectivo de simulaciones es la herramienta más común para valorar la calidad del tamaño muestral simulado. En nuestro modelo, todas las variables presentan un número de simulaciones efectivas superior a 100.
+
+```{r run_winbugs, eval = TRUE, class.source = 'fold-show'}
+# Modelo
+model_winbugs <- function() {
+  # Verosimilitud
+  for (i in 1:n) {
+    O[i] ~ dpois(mu[i]) 
+    log(mu[i]) <- log(E[i]) + m + u[i] + v[i] 
+    u[i] ~ dnorm(0, precu) 
+    R[i] <- exp(m + u[i] + v[i]) 
+  }
+  
+  # Distribuciones previas
+  m ~ dflat()
+  v[1:n] ~ car.normal(adj[], w[], num[], precv)
+  precu <- pow(sdu, -2)
+  precv <- pow(sdv, -2)
+  sdu ~ dunif(0, 10)
+  sdv ~ dunif(0, 10)
+  
+  # Predictivas y residuos
+  for (i in 1:n) {
+    y.pred[i] ~ dpois(mu[i])
+    resid[i] <- y.pred[i] - O[i]
+    P.resid[i] <- step(resid[i]) - 0.5 * equals(resid[i], 0)
+  }
+}
+
+# Requisitos modelo
+data <- list(
+  O = aragon_poly$O,
+  E = aragon_poly$E,
+  adj = nbWinBugs$adj,
+  w = nbWinBugs$weights,
+  num = nbWinBugs$num,
+  n = nrow(aragon_poly)
+)
+
+init_values <- function() {
+  list(
+    m = rnorm(1, 0, 1),
+    u = rnorm(729, 0, 1),
+    v = rnorm(729, 0, 1),
+    sdu = runif(1, 0, 1),
+    sdv = runif(1, 0, 1)
+  )
+}
+
+params <- c("R", "m", "u", "v", "sdu", "sdv",
+            "y.pred", "resid", "P.resid")
+
+# Correr el modelo
+set.seed(2023)
+mod_bugs <- bugs(model = model_winbugs, data = data,
+                 inits = init_values, parameters = params,
+                 n.chains = 4,
+                 n.iter = 50000,
+                 n.burnin = 5000,
+                 n.thin = 30,
+                 debug = FALSE)
+
+save(mod_bugs, file="./modelos_winbugs/mod_bugs.RData")
+```
+```{r n_eff, class.source = 'fold-show'}
+load(file.path("./modelos_winbugs", "mod_bugs.RData"))
+
+# Número simulaciones efectivas
+#sum(mod_bugs$summary[, "n.eff"] < 100)
+pander(summary(mod_bugs$summary[, "n.eff"]))
+```
+
+Para evaluar la consistencia entre las cadenas, es decir, no solo su estabilidad individual sino también la consistencia entre las distintas 4, observamos el valor de Rhat. Confirmamos que hay consistencia y no se aprocian diferencias en la variabilidad de las cadenas combinadas frente a cada cadena individualmente, encontrando valores de Rhat por debajo de 1.1.
+
+```{r Rhat, class.source = 'fold-show'}
+# Rhat
+#sum(mod_bugs$summary[, "Rhat"] > 1.1)
+pander(summary(mod_bugs$summary[, "Rhat"]))
+```
+
+Además, en la Figura 3 se muestra la distribución de los residuos y la probabilidad de que los valores de la predicción a posteriori (ajustados) sean mayores que los observados. A pesar de no parecerse del todo a una uniforme, no muestran claramente valores por encima o por debajo de los observados. Por lo tanto, decidimos proseguir con este ajuste.
+
+```{r residuos_winbugs, echo = FALSE, fig.cap = "**Figura 3**. Histograma de los residuos y P(predichos > observados)."}
+# Residuos
+par(mfrow = c(1,2))
+hist(mod_bugs$mean$resid,
+     xlab = " ",
+     main = "Residuos")
+
+hist(mod_bugs$mean$P.resid,
+     xlab = "P(predichos > observados)",
+     main = "P(predichos > observados)")
+```
+
+## Implementación en INLA
+
+Por otro lado, INLA es una alternativa para hacer inferencia Bayesiana en modelos latentes gaussianos, presentando una opción más rápida en comparación con los métodos MCMC. No obstante, a diferencia de los métodos MCMC, que son asintóticamente exactos y convergen a la distribución real, INLA es una aproximación numérica basada en la aproximación de Laplace. Hemos utilizado el paquete `R-INLA` v23.10.17 y para mantener cierta equivalencia entre los dos ajustes, hemos definido una distribución a priori uniforme para los hiperparámetros.
+
+```{r modelo_inla, class.source = 'fold-show'}
+# Efectos aleatorios
+aragon_poly$u <- seq(1, 729)
+aragon_poly$v <- seq(1, 729)
+
+# Definición prior uniforme
+sd_unif <- "expression:
+log_dens=-log_precision/2;
+return(log_dens)"
+
+# Formula
+formula <- O ~ 1 + 
+  f(v, 
+    model       = "besag", 
+    graph       = H,
+    scale.model = TRUE,
+    hyper       = 
+    list(prec = list(prior=sd_unif))) +
+  f(u, 
+    model       = "iid",
+    hyper       = 
+    list(prec = list(prior=sd_unif)))
+
+# Modelo
+mod_inla <- inla(
+  formula,
+  family = "poisson",
+  data = as.data.frame(aragon_poly),
+  E = E,
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE, cdf = c(log(1)))
+)
+```
+
+# Tarea 3. Representación RME suavizada  {.tabset .tabset-fade}
+
+A continuación, se presentan los resultados obtenidos mediante el método MCMC de WinBUGS y la aproximación numérica de INLA. Después de ajustar el modelo, se observa una suavización notable del RME (Figuras 4A y 4C) al compararlo con el gráfico del RME crudo (Figura 1B). La suavización es más evidente en aquellas regiones con municipios de menor tamaño poblacional, donde ya no encontramos valores tan extremos como antes, sino valores más suaves y coherentes de RME entre los municipios cercanos. Gracias a la modelización BYM, hemos logrado despenalizar esas áreas pequeñas y capturar el efecto espacial (Figura 6).
+
+Después de la suavización, seguimos observando que los municipios cercanos a Zaragoza y el Valle del Ebro tienen un RME mayor que otros municipios en la comunidad de Aragón. Además de esta zona central de mayor riesgo, la Figura 5 sugiere que la mayoría de los municipios en las provincias de Huesca y Teruel tienen un riesgo bajo.
+
+Por último, vemos que los resultados son prácticamente idénticos entre WinBUGS e INLA. A pesar de no utilizar exactamente las mismas priors, los resultados son muy similares. Sin embargo, es importante destacar que las pequeñas diferencias entre ambos métodos no deben atribuirse únicamente al error de INLA, ya que se basa en una aproximación numérica, sino también al error al simular con WinBUGS un tamaño muestral que no es muy grande en este caso.
+
+```{r}
+## Resultados WinBUGS
+# Media posteriori RME
+aragon_poly$RME_mean_bugs <- mod_bugs$mean$R
+aragon_poly$RME_mean_bugs <- cut(aragon_poly$RME_mean_bugs, quantile(aragon_poly$RME_mean_bugs), include.lowest = T)
+
+# SD posteriori RME
+aragon_poly$RME_sd_bugs <- mod_bugs$sd$R
+aragon_poly$RME_sd_bugs <- cut(aragon_poly$RME_sd_bugs,quantile(mod_bugs$sd$R), include.lowest = T)
+
+# Probabilidad RME mayor que 1
+aragon_poly$RME_p_bugs <- apply(mod_bugs[["sims.list"]][["R"]], 2, function(x) mean(x>1))
+
+# Media y SD efecto espacial
+aragon_poly$sp_mean_bugs <- round(mod_bugs$mean$v, 5)
+aragon_poly$sp_sd_bugs <- round(mod_bugs$sd$v, 5)
+
+## Resultados INLA
+# Media posteriori RME
+aragon_poly$RME_mean_inla <- mod_inla$summary.fitted.values$mean
+aragon_poly$RME_mean_inla <- cut(aragon_poly$RME_mean_inla, quantile(aragon_poly$RME_mean_inla), include.lowest = T)
+
+# SD posteriori RME
+aragon_poly$RME_sd_inla <- mod_inla$summary.fitted.values$sd
+aragon_poly$RME_sd_inla <- cut(aragon_poly$RME_sd_inla, quantile(aragon_poly$RME_sd_inla), include.lowest = T)
+
+# Probabilidad RME mayor que 1
+aragon_poly$RME_p_inla <- 1 - mod_inla$summary.fitted.values[,7] #1cdf
+
+# Media y SD efecto espacial
+aragon_poly$sp_mean_inla <- round(mod_inla$summary.random$v[["mean"]], 5)
+aragon_poly$sp_sd_inla <- round(mod_inla$summary.random$v[["sd"]], 5)
+```
+
+## Media-SD RME posteriori
+
+```{r, echo=FALSE, fig.cap = "**Figura 4**. Media y desviación típica a posteriori de la RME suavizada para cada municipio en Aragón. Resultados obtenidos empleando WinBUGS e INLA."}
+# Plot posteriori RME suavizada WinBUGS
+p1 <- ggplot(data = aragon_poly) +
+  geom_sf(aes(fill = RME_mean_bugs), color = "white") +
+  mytheme +
+  scale_fill_doypa("groovy", n = 4, discrete = T, name = "",
+                   guide = guide_legend(reverse = TRUE)) +
+  ggtitle("Media a posteriori RME")
+
+p2 <- ggplot(data = aragon_poly) +
+  geom_sf(aes(fill = RME_sd_bugs), color = "white") +
+  mytheme +
+  scale_fill_doypa("groovy", n = 4, discrete = T, name = "",
+                   guide = guide_legend(reverse = TRUE)) +
+  ggtitle("Sd a posteriori RME")
+
+# Plot posteriori RME suavizada INLA
+p3 <- ggplot(data = aragon_poly) +
+  geom_sf(aes(fill = RME_mean_inla), color = "white") +
+  mytheme +
+  scale_fill_doypa("groovy", n = 4, discrete = T, name = "",
+                   guide = guide_legend(reverse = TRUE)) +
+  ggtitle("Media a posteriori RME")
+
+p4 <- ggplot(data = aragon_poly) +
+  geom_sf(aes(fill = RME_sd_inla), color = "white") +
+  mytheme +
+  scale_fill_doypa("groovy", n = 4, discrete = T, name = "",
+                   guide = guide_legend(reverse = TRUE)) +
+  ggtitle("Sd a posteriori RME")
+
+ggarrange(
+  annotate_figure(ggarrange(p1, p2, ncol = 2), left = "WinBUGS"),
+  annotate_figure(ggarrange(p3, p4, ncol = 2), left = "INLA"),
+  nrow = 2
+)
+```
+
+## P(RME > 1)
+
+```{r, echo=FALSE, fig.cap = "**Figura 5**. Probabilidad de un RME mayor que 1 para cada municipio en Aragón. Resultados obtenidos empleando WinBUGS e INLA."}
+# Plot Pr RME WinBUGS
+p1 <- ggplot(data = aragon_poly) +
+  geom_sf(aes(fill = RME_p_bugs), color = "white") +
+  mytheme +
+  scale_fill_gradientn(colours = doypa("groovy", 4, F, F), name = "") +
+  ggtitle("P(RME > 1) WinBUGS")
+
+# Plot Pr RME INLA
+p2 <- ggplot(data = aragon_poly) +
+  geom_sf(aes(fill = RME_p_inla), color = "white") +
+  mytheme +
+  scale_fill_gradientn(colours = doypa("groovy", 4, F, F), name = "") +
+  ggtitle("P(RME > 1) INLA")
+
+ggarrange(p1, p2, ncol = 2)
+```
+
+## Efecto espacial
+
+```{r, echo = FALSE, fig.cap = "**Figura 6**. Media y desviación típica a posteriori del efecto espacial. Resultados obtenidos empleando WinBUGS e INLA."}
+# Efecto espacial WinBUGS
+p1 <- ggplot(data = aragon_poly) +
+  geom_sf(aes(fill = sp_mean_bugs), color = "white") +
+  mytheme +
+  scale_fill_gradientn(colours = doypa("groovy", 4, F, F), name = "") +
+  ggtitle("Media a posteriori de v")
+
+p2 <- ggplot(data = aragon_poly) +
+  geom_sf(aes(fill = sp_sd_bugs), color = "white") +
+  mytheme +
+  scale_fill_gradientn(colours = doypa("groovy", 4, F, F), name = "") +
+  ggtitle("Sd a posteriori de v")
+
+# Efecto espacial INLA
+p3 <- ggplot(data = aragon_poly) +
+  geom_sf(aes(fill = sp_mean_inla), color = "white") +
+  mytheme +
+  scale_fill_gradientn(colours = doypa("groovy", 4, F, F), name = "") +
+  ggtitle("Media a posteriori de v")
+
+p4 <- ggplot(data = aragon_poly) +
+  geom_sf(aes(fill = sp_sd_inla), color = "white") +
+  mytheme +
+  scale_fill_gradientn(colours = doypa("groovy", 4, F, F), name = "") +
+  ggtitle("Sd a posteriori de v")
+
+ggarrange(
+  annotate_figure(ggarrange(p1, p2, ncol = 2), left = "WinBUGS"),
+  annotate_figure(ggarrange(p3, p4, ncol = 2), left = "INLA"),
+  nrow = 2
+)
+```
+
+# Conclusión
+
+En conclusión, este trabajo destaca la importancia de emplear modelos jerárquicos, como este modelo BYM basado en inferencia Bayesiana, para comprender de manera más precisa los procesos espaciales. Los resultados obtenidos en el análisis de la enfermedad isquémica en hombres en Aragón revelan una mayor incidencia en los municipios de la zona central (provincia de Zaragoza), sugiriendo una relación con las áreas más pobladas alrededor del Valle del Ebro.
+
+El uso de herramientas como WinBUGS e INLA para hacer inferencia bayesiana, han proporcionado resultados prácticamente idénticos, permitiendo captar el efecto espacial en la comunidad de Aragón y suavizar la RME. Es importante destacar que INLA demostró ser computacionalmente más eficiente que WinBUGS en este contexto específico. El trabajo se ha abordado de manera rigurosa, fomentando la transparencia y la replicabilidad, de manera que cualquiera pueda obtener los mismos resultados que hemos producido.
+
+En resumen, los resultados revelan una distribución espacial provincial de la razón de mortalidad estandarizada para enfermedades isquémicas en Aragón, con un mayor riesgo en los municipios cercanos al Valle del Ebro.
+
+# Disponibilidad de datos y materiales
+
+Los datos y código empleados se encuentran disponibles en <https://github.com/jmestret/Tarea_DiseaseMapping>.
+
+# Referencias
